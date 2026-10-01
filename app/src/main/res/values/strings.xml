@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">ShareStudio</string>
+    <string name="action_start">empezar</string>
+    <string name="action_searching">buscando</string>
+    <string name="action_found">encontrado</string>
+    <string name="menu_options">Menú</string>
+    <string name="history_title">Historial</string>
+    <string name="history_empty_title">Historial vacío</string>
+    <string name="history_empty_subtitle">Aquí aparecerán tus archivos compartidos y recibidos</string>
+    <string name="action_back">Volver</string>
+    <string name="mode_emisor">emisor</string>
+    <string name="mode_receptor">receptor</string>
+    <string name="mode_sender_desc">Modo emisor. Toca para cambiar a receptor</string>
+    <string name="mode_receiver_desc">Modo receptor. Toca para cambiar a emisor</string>
+    <string name="downloads_title">Descargas</string>
+    <string name="no_files_found">No hay archivos en esta carpeta</string>
+    <string name="send_selected">Enviar archivos</string>
+    <string name="receiver_waiting_title">Esperando archivos...</string>
+    <string name="receiver_waiting_subtitle">Conectado al emisor. La transferencia comenzará pronto</string>
+    <string name="open_external_picker">Elegir de otro lugar</string>
+</resources>

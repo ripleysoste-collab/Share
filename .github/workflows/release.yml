@@ -1,0 +1,95 @@
+name: Build & Release ShareStudio
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Versión / Etiqueta del Release (ej: v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+      release_title:
+        description: 'Título del Release'
+        required: false
+        default: 'ShareStudio Release'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Compilar APK y Play Store AAB
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: ☕ Configurar Java 17 (JDK)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: 🔑 Dar permisos de ejecución a Gradle Wrapper
+        run: chmod +x gradlew
+
+      - name: 🛡️ Configurar Keystore para firma de Release
+        run: |
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "Usando Keystore provisto en GitHub Secrets..."
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > $GITHUB_WORKSPACE/my-upload-key.jks
+            echo "STORE_PASSWORD=${{ secrets.STORE_PASSWORD }}" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
+          else
+            echo "Generando Keystore autofirmado seguro para el release..."
+            keytool -genkey -v -keystore $GITHUB_WORKSPACE/my-upload-key.jks \
+              -alias upload \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass "sharestudio123" \
+              -keypass "sharestudio123" \
+              -dname "CN=ShareStudio, OU=Android, O=ShareStudio, L=City, S=State, C=US"
+            echo "STORE_PASSWORD=sharestudio123" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=sharestudio123" >> $GITHUB_ENV
+          fi
+
+      - name: 🚀 Compilar APK y Android App Bundle (.aab para Play Store)
+        run: |
+          ./gradlew assembleRelease bundleRelease --stacktrace
+
+      - name: 📦 Preparar archivos de instalación
+        run: |
+          mkdir -p release_binaries
+          cp app/build/outputs/apk/release/*.apk release_binaries/ShareStudio.apk
+          cp app/build/outputs/bundle/release/*.aab release_binaries/ShareStudio.aab
+
+      - name: 🏷️ Determinar nombre del tag
+        id: release_info
+        run: |
+          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
+            echo "TAG=${{ github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
+            echo "TITLE=${{ github.event.inputs.release_title || github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            TAG_FROM_REF="${GITHUB_REF#refs/tags/}"
+            echo "TAG=${TAG_FROM_REF}" >> $GITHUB_OUTPUT
+            echo "TITLE=ShareStudio ${TAG_FROM_REF}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 🌟 Publicar Release en GitHub con APK y AAB
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_info.outputs.TAG }}
+          name: ${{ steps.release_info.outputs.TITLE }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            release_binaries/ShareStudio.apk
+            release_binaries/ShareStudio.aab
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

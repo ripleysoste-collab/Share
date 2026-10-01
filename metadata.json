@@ -1,0 +1,6 @@
+{
+  "name": "ShareStudio",
+  "description": "Compartidor de archivos, APKs, imágenes y archivos comprimidos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
