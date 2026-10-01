@@ -333,6 +333,42 @@ fun StartScreen(
               .padding(horizontal = 32.dp)
               .testTag("p2p_status_text")
           )
+
+          // Muestra la red y la clave del emisor para que no haya duda si el sistema solicita conexión
+          if (transferMode == TransferMode.SENDER && (!p2pState.networkName.isNullOrBlank() || !p2pState.passphrase.isNullOrBlank()) && !isConnectionEstablished) {
+            Spacer(modifier = Modifier.height(10.dp))
+            androidx.compose.material3.Surface(
+              shape = RoundedCornerShape(12.dp),
+              color = Color(0xFFF8FAFC),
+              border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE2E8F0)),
+              modifier = Modifier.padding(horizontal = 24.dp)
+            ) {
+              Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+              ) {
+                Text(
+                  text = "Red Wi-Fi: ${p2pState.networkName ?: "DIRECT-ShareStudio"}",
+                  style = TextStyle(
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFF1E293B)
+                  )
+                )
+                if (!p2pState.passphrase.isNullOrBlank()) {
+                  Spacer(modifier = Modifier.height(2.dp))
+                  Text(
+                    text = "Clave Wi-Fi: ${p2pState.passphrase}",
+                    style = TextStyle(
+                      fontSize = 12.sp,
+                      fontWeight = FontWeight.Medium,
+                      color = Color(0xFF0284C7)
+                    )
+                  )
+                }
+              }
+            }
+          }
         }
       }
 

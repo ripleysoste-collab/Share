@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.NetworkInfo
+import android.net.wifi.WpsInfo
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pDeviceList
@@ -415,27 +416,35 @@ class WifiDirectManager(private val context: Context) {
 
   @SuppressLint("MissingPermission")
   private fun createSenderGroup(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      try {
+        val config = WifiP2pConfig.Builder()
+          .setNetworkName("DIRECT-ShareStudio")
+          .setPassphrase("12345678")
+          .build()
+
+        mgr.createGroup(ch, config, object : WifiP2pManager.ActionListener {
+          override fun onSuccess() {
+            onGroupCreatedSuccess(mgr, ch)
+          }
+
+          override fun onFailure(reason: Int) {
+            createStandardGroup(mgr, ch)
+          }
+        })
+        return
+      } catch (_: Throwable) {
+        // Fallback al método estándar en caso de no soportar config customizada
+      }
+    }
+    createStandardGroup(mgr, ch)
+  }
+
+  @SuppressLint("MissingPermission")
+  private fun createStandardGroup(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
     mgr.createGroup(ch, object : WifiP2pManager.ActionListener {
       override fun onSuccess() {
-        _uiState.update {
-          it.copy(
-            isGroupOwner = true,
-            isGroupFormed = true,
-            connectionStatus = P2pConnectionStatus.HOSTING_GROUP,
-            statusMessage = "Red propia activa (Emisor listo para match - 2:00)"
-          )
-        }
-
-        mgr.requestGroupInfo(ch) { group ->
-          group?.let { grp ->
-            _uiState.update {
-              it.copy(
-                networkName = grp.networkName,
-                passphrase = grp.passphrase
-              )
-            }
-          }
-        }
+        onGroupCreatedSuccess(mgr, ch)
       }
 
       override fun onFailure(reason: Int) {
@@ -447,6 +456,29 @@ class WifiDirectManager(private val context: Context) {
         }
       }
     })
+  }
+
+  @SuppressLint("MissingPermission")
+  private fun onGroupCreatedSuccess(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
+    _uiState.update {
+      it.copy(
+        isGroupOwner = true,
+        isGroupFormed = true,
+        connectionStatus = P2pConnectionStatus.HOSTING_GROUP,
+        statusMessage = "Red propia activa (Emisor listo para match - 2:00)"
+      )
+    }
+
+    mgr.requestGroupInfo(ch) { group ->
+      group?.let { grp ->
+        _uiState.update {
+          it.copy(
+            networkName = grp.networkName,
+            passphrase = grp.passphrase
+          )
+        }
+      }
+    }
   }
 
   /**
@@ -523,6 +555,8 @@ class WifiDirectManager(private val context: Context) {
     isConnectingOrConnected = true
     val config = WifiP2pConfig().apply {
       deviceAddress = device.deviceAddress
+      wps.setup = WpsInfo.PBC // Configuración Push Button: conexión automática sin solicitar contraseña manual
+      groupOwnerIntent = 0    // El receptor explícitamente se conecta como cliente al emisor
     }
 
     val targetName = device.deviceName.takeIf { !it.isNullOrBlank() } ?: "Emisor"

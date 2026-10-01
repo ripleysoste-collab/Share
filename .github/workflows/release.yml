@@ -2,6 +2,8 @@ name: Build & Release ShareStudio
 
 on:
   push:
+    branches:
+      - '**'
     tags:
       - 'v*'
   workflow_dispatch:
@@ -74,10 +76,14 @@ jobs:
           if [ -n "${{ github.event.inputs.tag_name }}" ]; then
             echo "TAG=${{ github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
             echo "TITLE=${{ github.event.inputs.release_title || github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
-          else
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             TAG_FROM_REF="${GITHUB_REF#refs/tags/}"
             echo "TAG=${TAG_FROM_REF}" >> $GITHUB_OUTPUT
             echo "TITLE=ShareStudio ${TAG_FROM_REF}" >> $GITHUB_OUTPUT
+          else
+            AUTO_TAG="v1.0.${{ github.run_number }}"
+            echo "TAG=${AUTO_TAG}" >> $GITHUB_OUTPUT
+            echo "TITLE=ShareStudio ${AUTO_TAG}" >> $GITHUB_OUTPUT
           fi
 
       - name: 🌟 Publicar Release en GitHub con APK y AAB
