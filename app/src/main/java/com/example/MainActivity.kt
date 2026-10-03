@@ -37,11 +37,14 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -51,6 +54,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.ripple
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -77,14 +81,31 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.data.FileMapEntity
 import com.example.ui.theme.ShareDropTheme
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 enum class AppScreen {
   HOME,
   SENDER_EXPLORER,
+  SENDER_MAPPING,
   RECEIVER_WAITING,
   HISTORY
 }
@@ -98,6 +119,8 @@ class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
+    // Inicialización inmediata y forzosa de la base de datos SQLite en disco
+    ShareStudioDatabase.getDatabase(this)
     setContent {
       ShareDropTheme {
         MainAppContainer()
@@ -111,15 +134,17 @@ fun MainAppContainer() {
   val context = LocalContext.current
   val wifiDirectManager = remember { WifiDirectManager(context) }
   val p2pState by wifiDirectManager.uiState.collectAsStateWithLifecycle()
+  val syncManager = remember { P2pMapSyncManager(wifiDirectManager.repository, CoroutineScope(Dispatchers.Main)) }
   var transferMode by remember { mutableStateOf(TransferMode.SENDER) }
   var currentScreen by remember { mutableStateOf(AppScreen.HOME) }
+  var selectedFileForMapping by remember { mutableStateOf<FileItem?>(null) }
 
   // Regla estricta: Hasta que no haya una conexión/condición real establecida entre los dispositivos,
   // no se cambia de interfaz. Si se pierde la conexión o se separan, regresa inmediatamente al inicio.
   LaunchedEffect(p2pState.connectionStatus, p2pState.matchedDeviceName) {
     val isConnectionEstablished = p2pState.connectionStatus == P2pConnectionStatus.CONNECTED &&
       !p2pState.matchedDeviceName.isNullOrBlank()
-    if (!isConnectionEstablished && (currentScreen == AppScreen.SENDER_EXPLORER || currentScreen == AppScreen.RECEIVER_WAITING)) {
+    if (!isConnectionEstablished && (currentScreen == AppScreen.SENDER_EXPLORER || currentScreen == AppScreen.SENDER_MAPPING || currentScreen == AppScreen.RECEIVER_WAITING)) {
       currentScreen = AppScreen.HOME
     }
   }
@@ -154,14 +179,35 @@ fun MainAppContainer() {
         FileExplorerScreen(
           matchedReceiverName = p2pState.matchedDeviceName,
           onBack = { currentScreen = AppScreen.HOME },
+          onStartMappingFile = { file ->
+            selectedFileForMapping = file
+            currentScreen = AppScreen.SENDER_MAPPING
+          },
           onSendFiles = { files ->
-            // Archivos seleccionados para enviar
+            if (files.isNotEmpty()) {
+              selectedFileForMapping = files.first()
+              currentScreen = AppScreen.SENDER_MAPPING
+            }
           }
         )
+      }
+      AppScreen.SENDER_MAPPING -> {
+        selectedFileForMapping?.let { fileItem ->
+          FileMappingScreen(
+            fileItem = fileItem,
+            receiverHost = p2pState.groupOwnerAddress,
+            repository = wifiDirectManager.repository,
+            syncManager = syncManager,
+            onBack = { currentScreen = AppScreen.SENDER_EXPLORER }
+          )
+        } ?: run {
+          currentScreen = AppScreen.SENDER_EXPLORER
+        }
       }
       AppScreen.RECEIVER_WAITING -> {
         ReceiverWaitingScreen(
           matchedSenderName = p2pState.matchedDeviceName,
+          syncManager = syncManager,
           onBack = { currentScreen = AppScreen.HOME }
         )
       }
@@ -638,7 +684,11 @@ fun HistoryScreen(
   repository: ShareStudioRepository,
   onBack: () -> Unit
 ) {
+  val context = LocalContext.current
   val activeMatches by repository.activeMatches.collectAsStateWithLifecycle(emptyList())
+  val fileMaps by repository.fileMaps.collectAsStateWithLifecycle(emptyList())
+  var selectedMapForDialog by remember { mutableStateOf<FileMapEntity?>(null) }
+  val dbStatus = remember { ShareStudioDatabase.getDatabaseInfo(context) }
 
   // Manejo del botón atrás físico o gesto del sistema
   BackHandler { onBack() }
@@ -651,7 +701,7 @@ fun HistoryScreen(
             text = stringResource(R.string.history_title),
             style = TextStyle(
               fontSize = 18.sp,
-              fontWeight = FontWeight.Normal,
+              fontWeight = FontWeight.SemiBold,
               letterSpacing = 0.5.sp,
               color = Color(0xFF1E293B)
             )
@@ -686,40 +736,184 @@ fun HistoryScreen(
       modifier = Modifier
         .fillMaxSize()
         .padding(innerPadding)
-        .background(Color.White)
-        .padding(horizontal = 24.dp),
-      contentAlignment = Alignment.Center
+        .background(Color.White),
+      contentAlignment = Alignment.TopCenter
     ) {
-      if (activeMatches.isNotEmpty()) {
-        Column(
-          horizontalAlignment = Alignment.CenterHorizontally,
-          verticalArrangement = Arrangement.Center
+      if (fileMaps.isNotEmpty() || activeMatches.isNotEmpty()) {
+        LazyColumn(
+          modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+          verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-          Text(
-            text = "Conexión activa guardada en base de datos",
-            style = TextStyle(
-              fontSize = 15.sp,
-              fontWeight = FontWeight.SemiBold,
-              color = Color(0xFF2563EB)
-            )
-          )
-          Spacer(modifier = Modifier.height(12.dp))
-          activeMatches.forEach { match ->
-            Text(
-              text = "${match.role}: ${match.peerDeviceName}",
-              style = TextStyle(
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-                color = Color(0xFF1E293B)
+          if (fileMaps.isNotEmpty()) {
+            item {
+              Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = Color(0xFFF0FDF4),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFBBF7D0)),
+                modifier = Modifier.padding(bottom = 6.dp)
+              ) {
+                Text(
+                  text = "● $dbStatus",
+                  style = TextStyle(
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = Color(0xFF16A34A)
+                  ),
+                  modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                )
+              }
+              Text(
+                text = "Mapas de Archivos en SQLite (data)",
+                style = TextStyle(
+                  fontSize = 13.sp,
+                  fontWeight = FontWeight.SemiBold,
+                  color = Color(0xFF64748B)
+                ),
+                modifier = Modifier.padding(bottom = 4.dp, top = 2.dp)
               )
-            )
+            }
+
+            items(fileMaps, key = { it.id }) { map ->
+              val dateStr = remember(map.createdAt) {
+                SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault()).format(Date(map.createdAt))
+              }
+
+              Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE2E8F0)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                modifier = Modifier
+                  .fillMaxWidth()
+                  .clickable { selectedMapForDialog = map }
+              ) {
+                Row(
+                  verticalAlignment = Alignment.CenterVertically,
+                  modifier = Modifier.padding(14.dp)
+                ) {
+                  // Icono de archivo de texto distintivo
+                  Box(
+                    modifier = Modifier
+                      .size(42.dp)
+                      .clip(RoundedCornerShape(10.dp))
+                      .background(Color(0xFFEFF6FF)),
+                    contentAlignment = Alignment.Center
+                  ) {
+                    Icon(
+                      imageVector = Icons.Default.Description,
+                      contentDescription = "Archivo de texto / mapa",
+                      tint = Color(0xFF2563EB),
+                      modifier = Modifier.size(24.dp)
+                    )
+                  }
+
+                  Spacer(modifier = Modifier.width(14.dp))
+
+                  Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                      text = "Mapa de ${map.originalFileName}",
+                      style = TextStyle(
+                        fontSize = 14.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFF0F172A)
+                      ),
+                      maxLines = 1,
+                      overflow = TextOverflow.Ellipsis
+                    )
+
+                    Spacer(modifier = Modifier.height(3.dp))
+
+                    Text(
+                      text = "${map.formattedSize} • ${map.totalEntries} elementos • ${map.role}",
+                      style = TextStyle(
+                        fontSize = 12.sp,
+                        color = Color(0xFF64748B)
+                      )
+                    )
+
+                    Spacer(modifier = Modifier.height(2.dp))
+
+                    Text(
+                      text = dateStr,
+                      style = TextStyle(
+                        fontSize = 11.sp,
+                        color = Color(0xFF94A3B8)
+                      )
+                    )
+                  }
+
+                  Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = if (map.role == "EMISOR") Color(0xFFEFF6FF) else Color(0xFFECFDF5)
+                  ) {
+                    Text(
+                      text = map.role,
+                      style = TextStyle(
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (map.role == "EMISOR") Color(0xFF2563EB) else Color(0xFF059669)
+                      ),
+                      modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                    )
+                  }
+                }
+              }
+            }
+          }
+
+          if (activeMatches.isNotEmpty()) {
+            item {
+              Spacer(modifier = Modifier.height(8.dp))
+              Text(
+                text = "Conexiones Activas",
+                style = TextStyle(
+                  fontSize = 13.sp,
+                  fontWeight = FontWeight.SemiBold,
+                  color = Color(0xFF64748B)
+                )
+              )
+            }
+            items(activeMatches, key = { it.id }) { match ->
+              Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = Color(0xFFF8FAFC),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE2E8F0)),
+                modifier = Modifier.fillMaxWidth()
+              ) {
+                Row(
+                  verticalAlignment = Alignment.CenterVertically,
+                  modifier = Modifier.padding(12.dp)
+                ) {
+                  Text(
+                    text = "${match.role}: ${match.peerDeviceName}",
+                    style = TextStyle(
+                      fontSize = 13.sp,
+                      fontWeight = FontWeight.Medium,
+                      color = Color(0xFF334155)
+                    )
+                  )
+                }
+              }
+            }
           }
         }
       } else {
         Column(
           horizontalAlignment = Alignment.CenterHorizontally,
-          verticalArrangement = Arrangement.Center
+          verticalArrangement = Arrangement.Center,
+          modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 24.dp)
         ) {
+          Icon(
+            imageVector = Icons.Default.Description,
+            contentDescription = null,
+            tint = Color(0xFF94A3B8),
+            modifier = Modifier.size(54.dp)
+          )
+          Spacer(modifier = Modifier.height(14.dp))
           Text(
             text = stringResource(R.string.history_empty_title),
             style = TextStyle(
@@ -741,6 +935,93 @@ fun HistoryScreen(
             ),
             textAlign = TextAlign.Center
           )
+          Spacer(modifier = Modifier.height(14.dp))
+          Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = Color(0xFFF0FDF4),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFBBF7D0))
+          ) {
+            Text(
+              text = "● $dbStatus",
+              style = TextStyle(
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                color = Color(0xFF16A34A)
+              ),
+              modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+            )
+          }
+        }
+      }
+    }
+  }
+
+  // Diálogo para ver el JSON milimétrico almacenado en SQLite
+  selectedMapForDialog?.let { map ->
+    Dialog(onDismissRequest = { selectedMapForDialog = null }) {
+      Card(
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+        modifier = Modifier
+          .fillMaxWidth()
+          .padding(vertical = 20.dp)
+      ) {
+        Column(
+          modifier = Modifier
+            .fillMaxWidth()
+            .padding(20.dp)
+        ) {
+          Text(
+            text = "Mapa: ${map.originalFileName}",
+            style = TextStyle(
+              fontSize = 16.sp,
+              fontWeight = FontWeight.SemiBold,
+              color = Color(0xFF0F172A)
+            )
+          )
+          Text(
+            text = "${map.formattedSize} • ${map.totalEntries} elementos • Guardado en SQLite",
+            style = TextStyle(fontSize = 12.sp, color = Color(0xFF64748B))
+          )
+
+          Spacer(modifier = Modifier.height(14.dp))
+
+          Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = Color(0xFF0F172A),
+            modifier = Modifier
+              .fillMaxWidth()
+              .height(280.dp)
+          ) {
+            Text(
+              text = map.mapJson,
+              style = TextStyle(
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                color = Color(0xFF38BDF8),
+                lineHeight = 15.sp
+              ),
+              modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(12.dp)
+            )
+          }
+
+          Spacer(modifier = Modifier.height(16.dp))
+
+          Button(
+            onClick = { selectedMapForDialog = null },
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+            shape = RoundedCornerShape(percent = 50),
+            modifier = Modifier.fillMaxWidth()
+          ) {
+            Text(
+              text = "Cerrar",
+              style = TextStyle(color = Color.White, fontWeight = FontWeight.SemiBold)
+            )
+          }
         }
       }
     }

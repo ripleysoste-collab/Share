@@ -18,4 +18,8 @@
     <string name="receiver_waiting_title">Esperando archivos...</string>
     <string name="receiver_waiting_subtitle">Conectado al emisor. La transferencia comenzará pronto</string>
     <string name="open_external_picker">Elegir de otro lugar</string>
+    <string name="storage_permission_title">Acceso a Descargas requerido</string>
+    <string name="storage_permission_desc">Para mostrar los archivos y documentos de tu carpeta de Descargas, ShareStudio necesita permiso de acceso a archivos.</string>
+    <string name="grant_storage_permission">Conceder permiso</string>
+    <string name="refresh_files">Actualizar lista</string>
 </resources>

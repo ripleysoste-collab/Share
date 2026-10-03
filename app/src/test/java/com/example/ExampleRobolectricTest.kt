@@ -54,7 +54,10 @@ class ExampleRobolectricTest {
     assertEquals(FileCategory.APK, FileRepository.getFileCategory("aplicacion.apk", false))
     assertEquals(FileCategory.DOCUMENT, FileRepository.getFileCategory("documento.txt", false))
     assertEquals(FileCategory.DOCUMENT, FileRepository.getFileCategory("datos.csv", false))
-    assertEquals(FileCategory.IMAGE, FileRepository.getFileCategory("foto.img", false))
+    assertEquals(FileCategory.OTHER, FileRepository.getFileCategory("archivo.bin", false))
+    assertTrue(FileRepository.isImageOrMedia("foto.jpg"))
+    assertTrue(FileRepository.isImageOrMedia("video.mp4"))
+    assertFalse(FileRepository.isImageOrMedia("documento.pdf"))
     assertEquals(FileCategory.DIRECTORY, FileRepository.getFileCategory("Descargas", true))
   }
 
@@ -93,5 +96,48 @@ class ExampleRobolectricTest {
     val sessionState = repository.sessionState.first()
     assertTrue(sessionState?.permissionsGranted == true)
     assertEquals("EMISOR", sessionState?.currentMode)
+  }
+
+  @Test
+  fun `verify file map creation and sqlite persistence`() = runBlocking {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val db = ShareStudioDatabase.getDatabase(context)
+    val repository = ShareStudioRepository(db)
+
+    val testFile = FileItem(
+      name = "documento_prueba.pdf",
+      path = "/storage/emulated/0/Download/documento_prueba.pdf",
+      isDirectory = false,
+      sizeBytes = 1024L,
+      formattedSize = "1 KB",
+      extension = "pdf",
+      category = FileCategory.DOCUMENT
+    )
+
+    // Crear mapa milimétrico
+    val map = FileMapEngine.createMilimetricMap(context, testFile)
+    assertEquals("documento_prueba.pdf", map.fileName)
+    assertEquals(1, map.totalEntries)
+    assertTrue(map.jsonString.contains("mapVersion"))
+    assertTrue(map.jsonString.contains("entries"))
+
+    // Guardar mapa en SQLite
+    val id = repository.saveFileMap(
+      originalFileName = map.fileName,
+      originalFilePath = map.filePath,
+      role = "EMISOR",
+      fileSizeBytes = map.fileSizeBytes,
+      formattedSize = map.formattedSize,
+      totalEntries = map.totalEntries,
+      maxDepth = map.maxDepth,
+      mapJson = map.jsonString
+    )
+    assertTrue(id > 0)
+
+    val storedMaps = repository.fileMaps.first()
+    assertEquals(1, storedMaps.size)
+    assertEquals("documento_prueba.pdf", storedMaps[0].originalFileName)
+    assertEquals("EMISOR", storedMaps[0].role)
+    assertTrue(storedMaps[0].mapJson.contains("documento_prueba.pdf"))
   }
 }

@@ -12,11 +12,9 @@ import java.text.DecimalFormat
 enum class FileCategory {
   DIRECTORY,
   COMPRESSED, // .zip, .rar, .7z, .obb, .tar, .gz -> cafecito
-  DOCUMENT,   // .txt, .csv, .pdf, .doc -> blanco / gris limpio
-  APK,        // .apk
-  IMAGE,      // .jpg, .png, .img, etc.
-  MEDIA,      // audio, video
-  OTHER
+  DOCUMENT,   // .txt, .csv, .pdf, .doc, .xls, .ppt -> blanco / gris limpio
+  APK,        // .apk, .xapk
+  OTHER       // otros archivos generales
 }
 
 data class FileItem(
@@ -33,15 +31,39 @@ data class FileItem(
 
 object FileRepository {
 
+  private val IMAGE_EXTENSIONS = setOf(
+    "jpg", "jpeg", "png", "webp", "gif", "svg", "bmp", "img", "ico", "heic", "heif", "tiff", "tif"
+  )
+
+  private val MEDIA_EXTENSIONS = setOf(
+    "mp4", "mkv", "mov", "avi", "webm", "3gp", "ts", "m4v", "flv", "wmv",
+    "mp3", "m4a", "wav", "flac", "ogg", "aac", "opus", "mid", "midi", "wma"
+  )
+
+  /**
+   * Determina si el archivo es imagen o multimedia (video/audio).
+   * Según el requerimiento, las imágenes y videos se excluyen del explorador de descargas.
+   */
+  fun isImageOrMedia(name: String, mimeType: String? = null): Boolean {
+    val ext = name.substringAfterLast('.', "").lowercase()
+    if (ext in IMAGE_EXTENSIONS || ext in MEDIA_EXTENSIONS) return true
+    if (mimeType != null) {
+      val lowerMime = mimeType.lowercase()
+      if (lowerMime.startsWith("image/") || lowerMime.startsWith("video/") || lowerMime.startsWith("audio/")) {
+        return true
+      }
+    }
+    return false
+  }
+
   fun getFileCategory(name: String, isDirectory: Boolean): FileCategory {
     if (isDirectory) return FileCategory.DIRECTORY
     val ext = name.substringAfterLast('.', "").lowercase()
     return when (ext) {
-      "zip", "rar", "7z", "tar", "gz", "obb", "bz2", "xz" -> FileCategory.COMPRESSED
+      "zip", "rar", "7z", "tar", "gz", "obb", "bz2", "xz", "iso", "7-zip" -> FileCategory.COMPRESSED
       "apk", "xapk", "apks" -> FileCategory.APK
-      "txt", "csv", "json", "xml", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "log" -> FileCategory.DOCUMENT
-      "jpg", "jpeg", "png", "webp", "gif", "svg", "bmp", "img", "ico" -> FileCategory.IMAGE
-      "mp4", "mkv", "mov", "avi", "webm", "mp3", "m4a", "wav", "flac", "ogg" -> FileCategory.MEDIA
+      "txt", "csv", "json", "xml", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+      "log", "html", "htm", "epub", "rtf", "odt", "ods", "odp", "md", "tsv" -> FileCategory.DOCUMENT
       else -> FileCategory.OTHER
     }
   }
@@ -55,46 +77,76 @@ object FileRepository {
   }
 
   /**
-   * Carga los archivos de la carpeta de Descargas (directo de disco y MediaStore)
+   * Carga los archivos de la carpeta de Descargas (excluyendo imágenes y videos).
+   * Lee mediante acceso a sistema de archivos y MediaStore.
    */
   fun loadDirectory(context: Context, directory: File? = null): List<FileItem> {
-    val targetDir = directory ?: Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
     val result = mutableListOf<FileItem>()
+    val seenPathsOrNames = mutableSetOf<String>()
 
-    // 1. Lectura por sistema de archivos directo
-    if (targetDir.exists() && targetDir.isDirectory) {
-      val files = targetDir.listFiles()
-      if (files != null) {
-        for (f in files) {
-          val isDir = f.isDirectory
-          val name = f.name
-          val size = if (isDir) 0L else f.length()
-          val count = if (isDir) f.listFiles()?.size ?: 0 else 0
-          val cat = getFileCategory(name, isDir)
-          result.add(
-            FileItem(
-              name = name,
-              path = f.absolutePath,
-              isDirectory = isDir,
-              sizeBytes = size,
-              formattedSize = if (isDir) "$count elementos" else formatFileSize(size),
-              extension = name.substringAfterLast('.', "").lowercase(),
-              category = cat,
-              itemCount = count
+    // Rutas directas en disco
+    val candidateDirs = if (directory != null) {
+      listOf(directory)
+    } else {
+      listOfNotNull(
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+        File(Environment.getExternalStorageDirectory(), "Download"),
+        File("/storage/emulated/0/Download"),
+        File("/sdcard/Download")
+      )
+    }
+
+    for (targetDir in candidateDirs) {
+      if (targetDir.exists() && targetDir.isDirectory) {
+        val files = targetDir.listFiles()
+        if (files != null) {
+          for (f in files) {
+            val name = f.name
+            if (name.startsWith(".")) continue // omitir ocultos
+
+            val isDir = f.isDirectory
+            if (!isDir && isImageOrMedia(name)) {
+              // Excluir imágenes y videos de descargas según lo solicitado
+              continue
+            }
+
+            val key = if (isDir) "dir:${f.absolutePath}" else "file:$name"
+            if (!seenPathsOrNames.add(key)) continue
+
+            val size = if (isDir) 0L else f.length()
+            val count = if (isDir) {
+              f.listFiles()?.count { !it.name.startsWith(".") && !isImageOrMedia(it.name) } ?: 0
+            } else 0
+
+            result.add(
+              FileItem(
+                name = name,
+                path = f.absolutePath,
+                isDirectory = isDir,
+                sizeBytes = size,
+                formattedSize = if (isDir) "$count archivos" else formatFileSize(size),
+                extension = name.substringAfterLast('.', "").lowercase(),
+                category = getFileCategory(name, isDir),
+                itemCount = count
+              )
             )
-          )
+          }
         }
       }
     }
 
-    // 2. Si el sistema de archivos directo no devolvió archivos (común en Android 11+ sin permisos legacy),
-    // consultamos MediaStore.Downloads
-    if (result.isEmpty() && directory == null) {
+    // Si estamos en la raíz de descargas, complementar con MediaStore
+    if (directory == null) {
       val mediaStoreItems = loadFromMediaStore(context)
-      result.addAll(mediaStoreItems)
+      for (item in mediaStoreItems) {
+        val key = "file:${item.name}"
+        if (seenPathsOrNames.add(key)) {
+          result.add(item)
+        }
+      }
     }
 
-    // Ordenar: carpetas primero, luego archivos por nombre
+    // Ordenar: carpetas primero, luego archivos alfabéticamente
     return result.sortedWith(
       compareByDescending<FileItem> { it.isDirectory }
         .thenBy { it.name.lowercase() }
@@ -104,39 +156,57 @@ object FileRepository {
   private fun loadFromMediaStore(context: Context): List<FileItem> {
     val items = mutableListOf<FileItem>()
     try {
-      val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        MediaStore.Downloads.EXTERNAL_CONTENT_URI
-      } else {
-        MediaStore.Files.getContentUri("external")
-      }
-
+      val collection = MediaStore.Files.getContentUri("external")
       val projection = arrayOf(
         MediaStore.MediaColumns._ID,
         MediaStore.MediaColumns.DISPLAY_NAME,
-        MediaStore.MediaColumns.SIZE
+        MediaStore.MediaColumns.SIZE,
+        MediaStore.MediaColumns.DATA,
+        MediaStore.MediaColumns.MIME_TYPE
       )
+
+      // Filtrar únicamente los archivos de la carpeta Download / Downloads
+      val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        "(${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? OR ${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? OR ${MediaStore.MediaColumns.DATA} LIKE ?)"
+      } else {
+        "${MediaStore.MediaColumns.DATA} LIKE ?"
+      }
+
+      val selectionArgs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        arrayOf("%Download%", "%Downloads%", "%/Download/%")
+      } else {
+        arrayOf("%/Download/%")
+      }
 
       context.contentResolver.query(
         collection,
         projection,
-        null,
-        null,
+        selection,
+        selectionArgs,
         "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
       )?.use { cursor ->
         val idColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
         val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
         val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
+        val dataColumn = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+        val mimeColumn = cursor.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE)
 
         while (cursor.moveToNext()) {
+          val name = cursor.getString(nameColumn) ?: continue
+          val mime = if (mimeColumn >= 0) cursor.getString(mimeColumn) else null
+
+          // Excluir imágenes y videos
+          if (isImageOrMedia(name, mime)) continue
+
           val id = cursor.getLong(idColumn)
-          val name = cursor.getString(nameColumn) ?: "Archivo"
           val size = cursor.getLong(sizeColumn)
+          val dataPath = if (dataColumn >= 0) cursor.getString(dataColumn) else null
           val uri = ContentUris.withAppendedId(collection, id)
 
           items.add(
             FileItem(
               name = name,
-              path = uri.toString(),
+              path = dataPath ?: uri.toString(),
               isDirectory = false,
               sizeBytes = size,
               formattedSize = formatFileSize(size),

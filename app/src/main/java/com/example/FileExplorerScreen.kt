@@ -1,5 +1,13 @@
 package com.example
 
+import android.Manifest
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -23,7 +31,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -38,20 +45,20 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -61,34 +68,102 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import java.io.File
+
+private fun checkStoragePermissionGranted(context: Context): Boolean {
+  return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+    Environment.isExternalStorageManager()
+  } else {
+    ContextCompat.checkSelfPermission(
+      context,
+      Manifest.permission.READ_EXTERNAL_STORAGE
+    ) == PackageManager.PERMISSION_GRANTED
+  }
+}
+
+private fun requestStoragePermission(context: Context, legacyLauncher: () -> Unit) {
+  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+    try {
+      val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+        data = Uri.parse("package:${context.packageName}")
+      }
+      context.startActivity(intent)
+    } catch (_: Exception) {
+      try {
+        val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+        context.startActivity(intent)
+      } catch (_: Exception) {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+          data = Uri.parse("package:${context.packageName}")
+        }
+        context.startActivity(intent)
+      }
+    }
+  } else {
+    legacyLauncher()
+  }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FileExplorerScreen(
   matchedReceiverName: String?,
   onBack: () -> Unit,
-  onSendFiles: (List<FileItem>) -> Unit
+  onStartMappingFile: (FileItem) -> Unit,
+  onSendFiles: (List<FileItem>) -> Unit = {}
 ) {
   val context = LocalContext.current
+  val lifecycleOwner = LocalLifecycleOwner.current
+
+  var hasPermission by remember { mutableStateOf(checkStoragePermissionGranted(context)) }
   var currentDirectory by remember { mutableStateOf<File?>(null) }
   var fileItems by remember { mutableStateOf<List<FileItem>>(emptyList()) }
   val selectedFiles = remember { mutableStateListOf<FileItem>() }
+  var reloadTrigger by remember { mutableStateOf(0) }
 
-  // Carga inicial y por navegación de carpetas
-  LaunchedEffect(currentDirectory) {
+  // Launcher para Android 10 y versiones anteriores
+  val legacyPermissionLauncher = rememberLauncherForActivityResult(
+    ActivityResultContracts.RequestPermission()
+  ) { granted ->
+    hasPermission = granted
+    if (granted) {
+      reloadTrigger++
+    }
+  }
+
+  // Escuchar el ciclo de vida (cuando el usuario regresa de Ajustes)
+  DisposableEffect(lifecycleOwner) {
+    val observer = LifecycleEventObserver { _, event ->
+      if (event == Lifecycle.Event.ON_RESUME) {
+        val granted = checkStoragePermissionGranted(context)
+        if (granted != hasPermission) {
+          hasPermission = granted
+        }
+        reloadTrigger++
+      }
+    }
+    lifecycleOwner.lifecycle.addObserver(observer)
+    onDispose {
+      lifecycleOwner.lifecycle.removeObserver(observer)
+    }
+  }
+
+  // Carga inicial y recarga por navegación de carpetas o permisos
+  LaunchedEffect(currentDirectory, reloadTrigger, hasPermission) {
     fileItems = FileRepository.loadDirectory(context, currentDirectory)
   }
 
@@ -123,7 +198,7 @@ fun FileExplorerScreen(
           uri = uri
         )
       }
-      onSendFiles(items)
+      onStartMappingFile(items.first())
     }
   }
 
@@ -175,6 +250,18 @@ fun FileExplorerScreen(
           }
         },
         actions = {
+          // Botón para refrescar
+          IconButton(
+            onClick = { reloadTrigger++ },
+            modifier = Modifier.testTag("refresh_files_button")
+          ) {
+            Icon(
+              imageVector = Icons.Default.Refresh,
+              contentDescription = stringResource(R.string.refresh_files),
+              tint = Color(0xFF475569)
+            )
+          }
+          // Selector de archivos del sistema
           IconButton(
             onClick = { openDocumentLauncher.launch(arrayOf("*/*")) },
             modifier = Modifier.testTag("open_external_storage_button")
@@ -247,83 +334,159 @@ fun FileExplorerScreen(
       }
     }
   ) { padding ->
-    if (fileItems.isEmpty()) {
-      Box(
-        modifier = Modifier
-          .fillMaxSize()
-          .padding(padding),
-        contentAlignment = Alignment.Center
-      ) {
-        Column(
-          horizontalAlignment = Alignment.CenterHorizontally,
-          modifier = Modifier.padding(32.dp)
+    Column(
+      modifier = Modifier
+        .fillMaxSize()
+        .padding(padding)
+    ) {
+      // Banner de permiso si aún no ha sido concedido
+      if (!hasPermission) {
+        Surface(
+          color = Color(0xFFFEF3C7),
+          shape = RoundedCornerShape(12.dp),
+          modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
         ) {
-          Icon(
-            imageVector = Icons.Default.FolderOpen,
-            contentDescription = null,
-            tint = Color(0xFF94A3B8),
-            modifier = Modifier.size(48.dp)
-          )
-          Spacer(modifier = Modifier.height(12.dp))
-          Text(
-            text = stringResource(R.string.no_files_found),
-            style = TextStyle(
-              fontSize = 14.sp,
-              color = Color(0xFF64748B),
-              fontWeight = FontWeight.Medium
-            )
-          )
-          Spacer(modifier = Modifier.height(16.dp))
-          Button(
-            onClick = { openDocumentLauncher.launch(arrayOf("*/*")) },
-            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF1F5F9)),
-            shape = RoundedCornerShape(percent = 50)
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(14.dp)
           ) {
-            Text(
-              text = stringResource(R.string.open_external_picker),
-              style = TextStyle(color = Color(0xFF2563EB), fontSize = 13.sp)
+            Icon(
+              imageVector = Icons.Default.Lock,
+              contentDescription = null,
+              tint = Color(0xFFD97706),
+              modifier = Modifier.size(24.dp)
             )
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+              Text(
+                text = stringResource(R.string.storage_permission_title),
+                style = TextStyle(
+                  fontSize = 13.sp,
+                  fontWeight = FontWeight.SemiBold,
+                  color = Color(0xFF92400E)
+                )
+              )
+              Text(
+                text = stringResource(R.string.storage_permission_desc),
+                style = TextStyle(
+                  fontSize = 11.5.sp,
+                  color = Color(0xFFB45309)
+                )
+              )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Button(
+              onClick = {
+                requestStoragePermission(context) {
+                  legacyPermissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+                }
+              },
+              colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD97706)),
+              shape = RoundedCornerShape(8.dp),
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+              Text(
+                text = stringResource(R.string.grant_storage_permission),
+                style = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+              )
+            }
           }
         }
       }
-    } else {
-      LazyColumn(
-        modifier = Modifier
-          .fillMaxSize()
-          .padding(padding)
-          .testTag("file_list"),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-      ) {
-        items(fileItems, key = { it.path }) { item ->
-          val isSelected = selectedFiles.contains(item)
-          FileItemRow(
-            item = item,
-            isSelected = isSelected,
-            onClick = {
-              if (item.isDirectory) {
-                currentDirectory = File(item.path)
+
+      if (fileItems.isEmpty()) {
+        Box(
+          modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+          contentAlignment = Alignment.Center
+        ) {
+          Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(32.dp)
+          ) {
+            Icon(
+              imageVector = Icons.Default.FolderOpen,
+              contentDescription = null,
+              tint = Color(0xFF94A3B8),
+              modifier = Modifier.size(54.dp)
+            )
+            Spacer(modifier = Modifier.height(14.dp))
+            Text(
+              text = if (!hasPermission) {
+                stringResource(R.string.storage_permission_desc)
               } else {
-                if (isSelected) {
-                  selectedFiles.remove(item)
-                } else {
-                  selectedFiles.add(item)
-                }
+                stringResource(R.string.no_files_found)
+              },
+              style = TextStyle(
+                fontSize = 14.sp,
+                color = Color(0xFF64748B),
+                fontWeight = FontWeight.Medium,
+                textAlign = TextAlign.Center
+              )
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+
+            if (!hasPermission) {
+              Button(
+                onClick = {
+                  requestStoragePermission(context) {
+                    legacyPermissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+                  }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+                shape = RoundedCornerShape(percent = 50)
+              ) {
+                Text(
+                  text = stringResource(R.string.grant_storage_permission),
+                  style = TextStyle(color = Color.White, fontSize = 13.sp)
+                )
+              }
+            } else {
+              Button(
+                onClick = { openDocumentLauncher.launch(arrayOf("*/*")) },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF1F5F9)),
+                shape = RoundedCornerShape(percent = 50)
+              ) {
+                Text(
+                  text = stringResource(R.string.open_external_picker),
+                  style = TextStyle(color = Color(0xFF2563EB), fontSize = 13.sp)
+                )
               }
             }
-          )
+          }
+        }
+      } else {
+        LazyColumn(
+          modifier = Modifier
+            .fillMaxSize()
+            .testTag("file_list"),
+          contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+          verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+          items(fileItems, key = { it.path }) { item ->
+            val isSelected = selectedFiles.contains(item)
+            FileItemRow(
+              item = item,
+              isSelected = isSelected,
+              onClick = {
+                if (item.isDirectory) {
+                  currentDirectory = File(item.path)
+                } else {
+                  // Al tocar el archivo que va a pasar, cambia inmediatamente a la interfaz de creación de mapa
+                  onStartMappingFile(item)
+                }
+              }
+            )
+          }
         }
       }
     }
   }
 }
 
-/**
- * Fila de diseño para cada elemento:
- * - Carpetas: Icono azul pequeño con nombre y número de elementos.
- * - Archivos comprimidos (.zip, .obb, .rar): Icono cafecito distintivo.
- * - Archivos normales (.txt, .csv, etc.): Blancos con borde limpio.
- */
 @Composable
 fun FileItemRow(
   item: FileItem,
@@ -332,7 +495,6 @@ fun FileItemRow(
 ) {
   val (icon, iconTint, badgeBackground, itemBackground) = when (item.category) {
     FileCategory.DIRECTORY -> {
-      // Carpeta azul pequeña
       Quadruple(
         Icons.Default.Folder,
         Color(0xFF2563EB),
@@ -354,22 +516,6 @@ fun FileItemRow(
         Icons.Default.Android,
         Color(0xFF10B981),
         Color(0xFFECFDF5),
-        Color.White
-      )
-    }
-    FileCategory.IMAGE -> {
-      Quadruple(
-        Icons.Default.Image,
-        Color(0xFF0284C7),
-        Color(0xFFF0F9FF),
-        Color.White
-      )
-    }
-    FileCategory.MEDIA -> {
-      Quadruple(
-        Icons.Default.Movie,
-        Color(0xFF8B5CF6),
-        Color(0xFFF5F3FF),
         Color.White
       )
     }
@@ -398,7 +544,6 @@ fun FileItemRow(
       .padding(horizontal = 14.dp, vertical = 12.dp),
     verticalAlignment = Alignment.CenterVertically
   ) {
-    // Icono decorativo según categoría
     Box(
       modifier = Modifier
         .size(38.dp)
@@ -416,7 +561,6 @@ fun FileItemRow(
 
     Spacer(modifier = Modifier.width(14.dp))
 
-    // Nombre y tamaño/detalles
     Column(modifier = Modifier.weight(1f)) {
       Text(
         text = item.name,
@@ -440,7 +584,6 @@ fun FileItemRow(
       )
     }
 
-    // Indicador de selección para archivos no directorio
     if (!item.isDirectory) {
       Box(
         modifier = Modifier
@@ -459,7 +602,7 @@ fun FileItemRow(
             imageVector = Icons.Default.Check,
             contentDescription = null,
             tint = Color.White,
-            modifier = Modifier.size(13.dp)
+            modifier = Modifier.size(14.dp)
           )
         }
       }
